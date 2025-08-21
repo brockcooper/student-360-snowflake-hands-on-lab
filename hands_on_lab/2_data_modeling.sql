@@ -1,0 +1,151 @@
+-- Student 360 – Minimal Dim/Fact model using Dynamic Tables
+-- No SCDs; natural keys; small set of dims and facts
+
+-- Session context
+USE ROLE SYSADMIN;
+USE WAREHOUSE COMPUTE_WH;
+
+-- Source and target DBs
+USE DATABASE STUDENT_DATA_WAREHOUSE;
+
+-- =============================================================
+-- STAGE (Silver): Pre-aggregations as needed
+-- =============================================================
+-- LMS engagement per student/section/day derived from raw events
+CREATE OR REPLACE DYNAMIC TABLE STAGE.ENGAGEMENT_DAILY
+  TARGET_LAG = '30 days'
+  WAREHOUSE = COMPUTE_WH
+AS
+SELECT
+  l.STUDENT_ID,
+  x.COURSE_SECTION_ID,
+  CAST(l.EVENT_TS AS DATE) AS EVENT_DATE,
+  COUNT(*) AS EVENT_COUNT
+FROM STUDENT_DATA_LAKE.LMS.LMS_LOGINS l
+JOIN STUDENT_DATA_LAKE.LMS.COURSE_XWALK x
+  ON x.LMS_COURSE_ID = l.LMS_COURSE_ID
+GROUP BY 1,2,3;
+
+-- =============================================================
+-- DIMENSIONS (simple, natural keys)
+-- =============================================================
+-- DimStudent
+CREATE OR REPLACE DYNAMIC TABLE DIM.STUDENT
+  TARGET_LAG = '30 days'
+  WAREHOUSE = COMPUTE_WH
+AS
+SELECT
+  s.STUDENT_ID,
+  s.FIRST_NAME,
+  s.LAST_NAME,
+  s.EMAIL,
+  s.PROGRAM,
+  s.MAJOR,
+  s.RESIDENCY,
+  s.ADVISOR_ID
+FROM STUDENT_DATA_LAKE.SIS.STUDENTS s;
+
+-- DimTerm
+CREATE OR REPLACE DYNAMIC TABLE DIM.TERM
+  TARGET_LAG = '30 days'
+  WAREHOUSE = COMPUTE_WH
+AS
+SELECT
+  t.TERM_ID,
+  t.TERM_NAME,
+  t.START_DATE,
+  t.END_DATE
+FROM STUDENT_DATA_LAKE.SIS.TERMS t;
+
+-- DimSection (enriched with course attributes)
+CREATE OR REPLACE DYNAMIC TABLE DIM.SECTION
+  TARGET_LAG = '30 days'
+  WAREHOUSE = COMPUTE_WH
+AS
+SELECT
+  sec.COURSE_SECTION_ID,
+  sec.COURSE_ID,
+  c.SUBJECT,
+  c.CATALOG_NBR,
+  c.TITLE,
+  c.UNITS,
+  sec.MODALITY,
+  sec.TERM_ID
+FROM STUDENT_DATA_LAKE.SIS.SECTIONS sec
+JOIN STUDENT_DATA_LAKE.SIS.COURSES c
+  ON c.COURSE_ID = sec.COURSE_ID;
+
+-- DimAdvisor
+CREATE OR REPLACE DYNAMIC TABLE DIM.ADVISOR
+  TARGET_LAG = '30 days'
+  WAREHOUSE = COMPUTE_WH
+AS
+SELECT
+  a.ADVISOR_ID,
+  a.ADVISOR_NAME,
+  a.DEPARTMENT
+FROM STUDENT_DATA_LAKE.STUDENT_ADVISING.ADVISORS a;
+
+-- =============================================================
+-- FACTS (natural keys; minimal measures)
+-- =============================================================
+-- Enrollment fact (student-section-term)
+CREATE OR REPLACE DYNAMIC TABLE FACT.ENROLLMENT
+  TARGET_LAG = '30 days'
+  WAREHOUSE = COMPUTE_WH
+AS
+SELECT
+  e.STUDENT_ID,
+  e.COURSE_SECTION_ID,
+  e.TERM_ID,
+  c.UNITS AS ATTEMPTED_UNITS,
+  e.ENROLLMENT_STATUS,
+  e.GRADE_LETTER,
+  e.GRADE_POINTS
+FROM STUDENT_DATA_LAKE.SIS.ENROLLMENTS e
+JOIN STUDENT_DATA_LAKE.SIS.SECTIONS s
+  ON s.COURSE_SECTION_ID = e.COURSE_SECTION_ID
+JOIN STUDENT_DATA_LAKE.SIS.COURSES c
+  ON c.COURSE_ID = s.COURSE_ID;
+
+-- Engagement fact (daily aggregation)
+CREATE OR REPLACE DYNAMIC TABLE FACT.ENGAGEMENT_DAILY
+  TARGET_LAG = '30 days'
+  WAREHOUSE = COMPUTE_WH
+AS
+SELECT
+  STUDENT_ID,
+  COURSE_SECTION_ID,
+  EVENT_DATE,
+  EVENT_COUNT
+FROM STAGE.ENGAGEMENT_DAILY;
+
+-- Financial transactions (signed amounts)
+CREATE OR REPLACE DYNAMIC TABLE FACT.FINANCIAL_TRANSACTION
+  TARGET_LAG = '30 days'
+  WAREHOUSE = COMPUTE_WH
+AS
+SELECT
+  t.STUDENT_ID,
+  t.TERM_ID,
+  t.TRANS_DT,
+  t.TRANS_TYPE,
+  t.AMOUNT,
+  CASE WHEN UPPER(t.TRANS_TYPE) = 'CHARGE' THEN 1 ELSE 0 END AS IS_CHARGE,
+  CASE WHEN UPPER(t.TRANS_TYPE) = 'PAYMENT' THEN 1 ELSE 0 END AS IS_PAYMENT,
+  CASE WHEN UPPER(t.TRANS_TYPE) = 'CHARGE' THEN t.AMOUNT ELSE - t.AMOUNT END AS SIGNED_AMOUNT,
+  t.METHOD
+FROM STUDENT_DATA_LAKE.FINANCIALS.TRANSACTIONS t;
+
+-- Advising appointments (named ADVISING as requested)
+CREATE OR REPLACE DYNAMIC TABLE FACT.ADVISING
+  TARGET_LAG = '30 days'
+  WAREHOUSE = COMPUTE_WH
+AS
+SELECT
+  appt.APPOINTMENT_ID,
+  appt.STUDENT_ID,
+  appt.ADVISOR_ID,
+  appt.APPOINTMENT_DT,
+  appt.OUTCOME
+FROM STUDENT_DATA_LAKE.STUDENT_ADVISING.APPOINTMENTS appt;
