@@ -2,7 +2,7 @@
 -- No SCDs; natural keys; small set of dims and facts
 
 -- Session context
-USE ROLE SYSADMIN;
+USE ROLE ACCOUUNTADMIN;
 USE WAREHOUSE COMPUTE_WH;
 
 -- Source and target DBs
